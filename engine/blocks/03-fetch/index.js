@@ -45,6 +45,13 @@ const MAX_FILES = 50;
 const MAX_REDIRECTS = 5;
 /** 默认单文件上限 64 MB。 */
 const DEFAULT_MAX_BYTES = 64 * 1024 * 1024;
+/**
+ * ★ 11-P0：Node 裸抓单次超时（ms）。
+ *   病根：原 `await fetch()` / `await arrayBuffer()` 无中止信号 ⇒ 慢站/挂起连接永不 resolve ⇒ 调用冻结（arxiv 实测）。
+ *   修法：每次 fetch 挂 `AbortSignal.timeout`，超时抛明确死因（不再永挂）。
+ *   取值 120s：宽松到不误杀正常慢下载，又给挂起连接一个上界；后台作业路（python）另用停滞检测，不受影响。
+ */
+const NODE_FETCH_TIMEOUT_MS = 120_000;
 
 let _guard = null;
 
@@ -103,6 +110,17 @@ export function sweep(outDir) {
             try { unlinkSync(p); removed.push(basename(p)); } catch { /* 忽略 */ }
         }
     }
+    // ★ 11：作业台账同属自家残留（关联表 #79：附属文件必须进清扫家族），>1h 的 `.fpjob\*.json` 一并收尸
+    const jobDir = join(outDir, '.fpjob');
+    try {
+        for (const n of readdirSync(jobDir)) {
+            const p = join(jobDir, n);
+            try {
+                const st = statSync(p);
+                if (st.isFile() && st.mtimeMs < cutoff) { unlinkSync(p); removed.push(`.fpjob/${n}`); }
+            } catch { /* 忽略 */ }
+        }
+    } catch { /* 无 .fpjob 目录 */ }
     return removed;
 }
 
@@ -146,16 +164,30 @@ function guessExt(ct) {
  *   | `always`（直接走扛P）| `off`（与改动前逐字节同行为）。
  *   降级铁律：① `URL_BLOCKED` 类错误**永不触发降级**（闸拒就是拒，换腿也不许放）；
  *   ② 降级路 `final_url` 缺失 = 拒收；拿到必再过一次 JS 侧 `assertSafeUrl`（关联表 #1/#30）。
+ * ★ 11 片（2026-11-23）：加 `background`（发起即返 jobId，不阻塞）与 `job`（轮询作业当下状态）。
+ *   三形态互斥优先级：`job` > `background` > 同步。`job`/`background` 都走 python 原始字节腿
+ *   （Node 路无法脱离调用存活 ⇒ 后台只有 python 路能兑现）。
  * @returns {Promise<string>} 交付文本（人/模型可读）
  */
-export async function fetchToDisk(ctx, { url, outDir, maxBytes, legs }) {
+export async function fetchToDisk(ctx, { url, outDir, maxBytes, legs, background, job }) {
     const guard = await loadGuard(ctx);
     const assertSafeUrl = guard.assertSafeUrl ?? guard.default;
     if (typeof assertSafeUrl !== 'function') {
         throw new FpError(ERR.NOT_ASSEMBLED, 'url-guard 没有导出 assertSafeUrl', '检查 ours/libs/url-guard.js 是否装配正确。');
     }
 
-    // ① 入口闸
+    const limit = Number.isFinite(maxBytes) && maxBytes > 0 ? Math.floor(maxBytes) : DEFAULT_MAX_BYTES;
+    const targetDir = typeof outDir === 'string' && outDir.trim() !== '' ? outDir : DEFAULT_OUT_DIR;
+    mkdirSync(targetDir, { recursive: true });
+    const swept = sweep(targetDir);
+
+    // ★ 11-P1-②：作业轮询（最高优先级：给了 job 就是查状态，**不需要 url、也不该过 URL 闸**）
+    //   ★ 11 实测踩坑：入口闸若在分派前无条件调用，轮询（无 url）会崩 `url 无法解析：undefined`。
+    if (typeof job === 'string' && job.trim() !== '') {
+        return pollJobText(ctx, targetDir, job.trim(), swept);
+    }
+
+    // ① 入口闸（仅同步/后台发起这两种需要 url 的形态）
     assertSafeUrl(url);
 
     const mode = (typeof legs === 'string' && legs.trim() !== '') ? legs.trim().toLowerCase() : 'auto';
@@ -163,10 +195,10 @@ export async function fetchToDisk(ctx, { url, outDir, maxBytes, legs }) {
         throw new FpError(ERR.BAD_ARGS, `fetch：legs 只认 auto / always / off，收到「${String(legs).slice(0, 30)}」`, '去掉这个参数（默认 auto）或按三个值之一传。');
     }
 
-    const limit = Number.isFinite(maxBytes) && maxBytes > 0 ? Math.floor(maxBytes) : DEFAULT_MAX_BYTES;
-    const targetDir = typeof outDir === 'string' && outDir.trim() !== '' ? outDir : DEFAULT_OUT_DIR;
-    mkdirSync(targetDir, { recursive: true });
-    const swept = sweep(targetDir);
+    // ★ 11-P1-①：后台发起（不阻塞，立即返回 jobId）
+    if (background === true) {
+        return startJobText(ctx, url, targetDir, limit, swept, assertSafeUrl);
+    }
 
     // ② Node 裸抓。legs:'off' = 原行为直道：错误**原样传播**（FpError 形状与改动前逐字一致，
     //    回归零，关联表 #2/#30 的账不破）。auto = 失败记死因再降级；always = 跳过 Node 路。
@@ -258,6 +290,81 @@ export async function fetchToDisk(ctx, { url, outDir, maxBytes, legs }) {
     return lines.join('\n');
 }
 
+/**
+ * ★ 11-P1-①：后台发起。立即返回 jobId + 落点 + 进度文件路径 + 轮询方法。
+ * 为什么必须在 python 路上：Node bare-fetch 跑在本调用的事件循环里，调用返回即无从存活；
+ *   python 子进程 detached 出去才能脱离本次调用继续下载（宿主进程的子进程，非 ctx 沙箱树）。
+ */
+async function startJobText(ctx, url, targetDir, limit, swept, assertSafeUrl) {
+    const bridge = await loadBridge(ctx);
+    if (typeof bridge.fpFetchRawJob !== 'function') {
+        throw new FpError(ERR.NOT_ASSEMBLED, 'fp-bridge.js 没有导出 fpFetchRawJob', '本片（11）的桥件未装配到位：检查 ours/fp-bridge.js。');
+    }
+    const name = `${OWN_PREFIX}${Date.now()}_${safeName(url, '')}`;
+    const dest = join(targetDir, name);
+    const r = bridge.fpFetchRawJob(url, { dest, outDir: targetDir, maxBytes: limit });
+    if (!r.ok) {
+        throw new FpError(ERR.BAD_ARGS, `后台下载发起失败：${r.diagnosis}`, '看 doctor 的桥可达性一段；或改用同步 fetch（不给 background）。');
+    }
+    const j = r.job;
+    const lines = [
+        `fetch · background · job ${j.id} · ${url}`,
+        `    dest: ${dest}`,
+        `    progress: ${j.progressFile}（0.4s 一跳，完成即删）`,
+        `    进度查询：fetch{job:"${j.id}"} —— 随时调，返回当下字节/百分比/用时/均速/腿（本调用已返回，下载在后台继续）`,
+        `    pid: ${j.pid ?? '未知'}`,
+    ];
+    if (swept.length > 0) lines.push(`    swept: ${swept.length} 个过期自家文件`);
+    return lines.join('\n');
+}
+
+/**
+ * ★ 11-P1-②：作业轮询。返回当下进度快照（字节/百分比/用时/均速/腿/相位）或终态。
+ * 数据源 = `<dest>.fpdl.json`（实时写）+ `<outJson>`（终态 verdict）——都是磁盘事实，不编。
+ */
+async function pollJobText(ctx, targetDir, jobId, swept) {
+    const bridge = await loadBridge(ctx);
+    if (typeof bridge.fpJobStatus !== 'function') {
+        throw new FpError(ERR.NOT_ASSEMBLED, 'fp-bridge.js 没有导出 fpJobStatus', '本片（11）的桥件未装配到位：检查 ours/fp-bridge.js。');
+    }
+    const s = bridge.fpJobStatus(targetDir, jobId);
+    if (!s.ok) {
+        throw new FpError(ERR.BAD_ARGS, `作业查询失败：${s.diagnosis}`, '核对 jobId；作业台账只保留 1 小时（>1h 自动清扫）。');
+    }
+    const done = Number(s.bytesDone ?? 0);
+    const total = Number.isFinite(s.bytesTotal) ? s.bytesTotal : null;
+    const pct = (total && total > 0) ? Math.min(100, Math.round(done / total * 1000) / 10) : null;
+    const speed = Number.isFinite(s.avgBps) && s.avgBps > 0 ? `${Math.round(s.avgBps / 1024)} KB/s` : null;
+    const head = `fetch · job ${jobId} · ${s.status}${pct !== null ? ` · ${pct}%` : ''} · ${done}${total !== null ? `/${total}` : ''} bytes · ${s.elapsedS}s${speed ? ` · ${speed}` : ''}`;
+    const lines = [head];
+
+    if (s.status === 'working') {
+        lines.push(`    相位: ${s.phase || 'downloading'}${s.leg ? ` · 腿: ${s.leg}` : ''}`);
+        if (s.stallS !== null && s.stallS !== undefined) lines.push(`    最后进度更新: ${s.stallS}s 前`);
+        lines.push('    下载仍在后台进行；再调 fetch{job} 可看最新状态。');
+    } else if (s.status === 'done') {
+        lines.push(`    saved: ${s.dest}`);
+        if (s.leg) lines.push(`    via: fp-raw · leg=${s.leg}`);
+        if (s.contentType) lines.push(`    content-type: ${s.contentType}`);
+        if (s.truncated) lines.push('    ⚠ 已截断：超过 maxBytes（落盘的是前 maxBytes 字节）');
+        if (s.finalUrl) lines.push(`    final_url: ${s.finalUrl}`);
+    } else if (s.status === 'blocked') {
+        lines.push(`    ⚠ SSRF 闸拒：${s.reason}`);
+        lines.push('    这条 URL 过不了闸，换腿也不放（设计内）。');
+    } else if (s.status === 'failed') {
+        lines.push(`    ✘ 下载失败：${s.diagnosis}`);
+        if (s.errors?.length) lines.push(`    errors: ${s.errors.join(' | ').slice(0, 240)}`);
+    } else if (s.status === 'timeout') {
+        lines.push(`    ✘ ${s.diagnosis}`);
+        lines.push('    作业已按 TIMEOUT 处理；可重发 fetch{background:true} 或改走 search{url} 取文本。');
+    } else if (s.status === 'lost') {
+        lines.push(`    ✘ ${s.diagnosis}`);
+        lines.push('    可能原因：作业被宿主回收 / python 启动即失败 / jobId 拼错。看 doctor 的桥段。');
+    }
+    if (swept.length > 0) lines.push(`    swept: ${swept.length} 个过期自家文件`);
+    return lines.join('\n');
+}
+
 /** Node 裸抓成功路径的交付——**形状与 04 之前逐字节一致**（回归零：G4 S-3 的账）。 */
 function deliver(r, swept) {
     const lines = [
@@ -271,13 +378,34 @@ function deliver(r, swept) {
     return lines.join('\n');
 }
 
+/**
+ * ★ 11-P0：Node 裸抓超时诊断。把 AbortSignal.timeout 触发的中止/超时，
+ *   转成带死因的 FpError（不再让挂起连接永挂、也不让 TimeoutError 裸冒到调用方）。
+ */
+function nodeTimeoutDiag(e, url) {
+    const name = String(e?.name ?? '');
+    const msg = String(e?.message ?? e ?? '');
+    const isTimeout = name === 'TimeoutError' || e?.code === 'ABORT_ERR' || /timeout|abort|timed out/i.test(msg);
+    return new FpError(
+        ERR.BAD_ARGS,
+        `Node 裸抓超时${isTimeout ? `（${NODE_FETCH_TIMEOUT_MS / 1000}s 内未完成）` : ''}：${url}`,
+        '目标站连接挂起或过慢；可加 legs:"always" 走反扒原始字节腿，或稍后重试（后台作业路不受此限）。'
+    );
+}
+
 /** Node 路主体（原 ②③ 段原样搬来，不改语义；reject ⇒ 网络错/HTTP 错，resolve ⇒ 已落盘）。 */
 async function nodeFetch(url, assertSafeUrl, limit, targetDir) {
     let current = url;
     let response = null;
     let hops = 0;
     for (; hops <= MAX_REDIRECTS; hops += 1) {
-        const res = await fetch(current, { redirect: 'manual' });
+        const signal = AbortSignal.timeout(NODE_FETCH_TIMEOUT_MS);   // ★ 11-P0
+        let res;
+        try {
+            res = await fetch(current, { redirect: 'manual', signal });
+        } catch (e) {
+            throw nodeTimeoutDiag(e, current);   // ★ 11-P0：挂起连接不再永挂
+        }
         if (res.status >= 300 && res.status < 400) {
             const loc = res.headers.get('location');
             if (!loc) { response = res; break; }
@@ -295,7 +423,12 @@ async function nodeFetch(url, assertSafeUrl, limit, targetDir) {
     if (!response.ok) {
         throw new FpError(ERR.BAD_ARGS, `HTTP ${response.status}：${url}`, '检查 URL 是否有效。');
     }
-    const ab = await response.arrayBuffer();
+    let ab;
+    try {
+        ab = await response.arrayBuffer();   // body 读受该请求 signal 约束
+    } catch (e) {
+        throw nodeTimeoutDiag(e, current);   // ★ 11-P0
+    }
     let buf = Buffer.from(ab);
     let truncated = false;
     if (buf.length > limit) {

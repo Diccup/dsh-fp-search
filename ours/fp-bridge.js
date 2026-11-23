@@ -3,8 +3,8 @@
 // 通信走文件（沙箱内 stdout 管道不可靠，同 ws-transport 教训）；spawn 必须异步。
 // PYTHONIOENCODING/PYTHONUTF8 双锁（GBK 控制台把 diagnosis 中文变问号的坑，2026-10-31 核对发现）。
 // fp 布局：lib\types\fp-bridge.js 的上两级 = 包根\PAGE增强根，fp\ 在其下（工作区与发布形态一致）。
-import { spawn } from 'node:child_process';
-import { readFileSync, existsSync, unlinkSync, mkdirSync, readdirSync, statSync } from 'node:fs';
+import { spawn, execFileSync } from 'node:child_process';
+import { readFileSync, existsSync, unlinkSync, mkdirSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -171,4 +171,184 @@ export async function fpFetchRaw(url, opts = {}) {
     hops: Array.isArray(verdict.hops) ? verdict.hops : [],
     errors: verdict.errors || [],
   };
+}
+
+// ============================================================== ★ 11-P1 后台作业
+// 病根（本会话实测）：宿主无工具进度推送通道（S1 契约级实锤）+ ctx 独占 ⇒ 阻塞调用期间
+//   既无进度可看、慢站还会把调用冻住。后台四路线（fp 参 / ctx background / Start-Process /
+//   schtasks）在 ctx 沙箱侧实测全封；**唯一活路 = 插件在宿主进程里 detached spawn**，
+//   调用立即返回 jobId，之后随时轮询进度小文件看当下状态。
+// 设计要点：
+//   · 作业零 python 改动 —— cli.py 的 --out-file 无条件下写 verdict，--progress 无条件写进度小文件；
+//     本层只负责"发起时不等待、轮询时读盘"。
+//   · 作业台账 `<outDir>/.fpjob/<id>.json`：记录 pid/dest/outJson/progressFile/发起时刻/腿参数。
+//   · 进度 = `<dest>.fpdl.json`（06 家族，0.4s 一跳；完成/失败即删 ⇒ 文件消失 + verdict 在 = 终态）。
+//   · 清扫并入既有的 outDir 清扫面（11 起由 03-fetch 的 sweep 一并按 mtime 收尸）。
+
+/** 作业台账所在子目录（在 outDir 下，与 `fp_` 家族同域）。 */
+export const JOB_SUBDIR = '.fpjob';
+
+function jobDirOf(outDir) {
+  const d = join(outDir, JOB_SUBDIR);
+  try { mkdirSync(d, { recursive: true }); } catch {}
+  return d;
+}
+
+function jobFileOf(outDir, id) {
+  return join(jobDirOf(outDir), `${id}.json`);
+}
+
+/** 读作业台账；不存在/坏了 ⇒ null（如实返回，不编）。 */
+export function readJob(outDir, id) {
+  try { return JSON.parse(readFileSync(jobFileOf(outDir, safeJobId(id)), 'utf8')); }
+  catch { return null; }
+}
+
+/** jobId 只留安全字符（防路径穿越：这是外部可传的参数）。 */
+export function safeJobId(id) {
+  return String(id ?? '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64);
+}
+
+/**
+ * ★ 发起后台下载作业：立即返回，不等待下载完成。
+ * @param {string} url
+ * @param {{dest:string, outDir:string, maxBytes?:number, legs?:string[], fpLegTimeoutSec?:number}} opts
+ * @returns {{ok:boolean, job?:object, diagnosis?:string}}
+ */
+export function fpFetchRawJob(url, opts = {}) {
+  const st = fpStatus();
+  if (!st.py || !st.fp) return { ok: false, diagnosis: `fp unavailable: py=${st.py} fp=${st.fp}` };
+  if (typeof opts.dest !== 'string' || opts.dest.trim() === '')
+    return { ok: false, diagnosis: 'fpFetchRawJob: dest 必须给（落盘绝对路径，由调用方命名）' };
+  const outDir = opts.outDir || tmpdir();
+  try { mkdirSync(outDir, { recursive: true }); } catch {}
+  sweepTmp(outDir);
+  const legSec = Math.max(3, Math.round(opts.fpLegTimeoutSec ?? 12));
+  const id = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const outJson = join(outDir, `wsb_fp_raw_${id}.json`);   // wsb_fp_ 前缀 ⇒ sweepTmp 能收尸
+  const args = [FP_PY, url, '--raw', '--quiet', '--dest', opts.dest,
+    '--out-file', outJson, '--timeout', String(legSec), '--progress'];
+  if (Number.isFinite(opts.maxBytes) && opts.maxBytes > 0) args.push('--max-bytes', String(Math.floor(opts.maxBytes)));
+  if (Array.isArray(opts.legs) && opts.legs.length > 0) args.push('--legs', opts.legs.join(','));
+  let child;
+  try {
+    // ★ detached + unref：作业不占调用方的等待，进程独立于本次工具调用存活。
+    child = spawn(_py, args, {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+      env: {
+        ...process.env,
+        PYTHONIOENCODING: 'utf-8',
+        PYTHONUTF8: '1',
+        PYTHONDONTWRITEBYTECODE: '1',
+      },
+    });
+    child.unref();
+  } catch (e) {
+    return { ok: false, diagnosis: `作业发起失败：${String(e?.code || e?.message || e)}` };
+  }
+  const rec = {
+    id, url, dest: opts.dest, outJson, outDir,
+    progressFile: `${opts.dest}.fpdl.json`,
+    legSec, maxBytes: Number.isFinite(opts.maxBytes) ? Math.floor(opts.maxBytes) : null,
+    legs: Array.isArray(opts.legs) ? opts.legs : null,
+    pid: child?.pid ?? null,
+    startedAt: new Date().toISOString(),
+    startedMs: Date.now(),
+  };
+  try { writeFileSync(jobFileOf(outDir, id), JSON.stringify(rec, null, 2), 'utf8'); }
+  catch (e) { return { ok: false, diagnosis: `作业台账写入失败：${String(e?.code || e?.message || e)}` }; }
+  return { ok: true, job: rec };
+}
+
+/**
+ * ★ 轮询作业当下状态：读进度小文件 + verdict（有则终态）。
+ * 返回 status：working（有进度、无 verdict）/ done / failed / blocked / timeout / lost（台账在但既无进度也无 verdict）。
+ */
+export function fpJobStatus(outDir, id, opts = {}) {
+  const rec = readJob(outDir, id);
+  if (!rec) return { ok: false, diagnosis: `找不到作业 ${id}（台账不在 ${join(outDir, JOB_SUBDIR)}）` };
+  const now = Date.now();
+  const stallSec = Math.max(30, Number(opts.stallSec ?? 180));
+
+  // ① 进度小文件（下载中/刚结束两种都有价值）
+  let prog = null;
+  try { prog = JSON.parse(readFileSync(rec.progressFile, 'utf8')); } catch {}
+
+  // ② 终态 verdict（cli --out-file 无条件写；作业结束才有）
+  let verdict = null;
+  try { verdict = JSON.parse(readFileSync(rec.outJson, 'utf8')); } catch {}
+
+  const elapsed = Math.round((now - rec.startedMs) / 1000);
+  if (verdict) {
+    // 台账保留（便于再次查询终态），verdict 读到即终态
+    if (verdict.blocked) {
+      return { ok: true, status: 'blocked', job: rec, elapsedS: elapsed,
+        bytesDone: prog?.bytes_done ?? 0, bytesTotal: prog?.bytes_total ?? null,
+        reason: verdict.reason || 'SSRF 闸拒', leg: verdict.leg_used || null,
+        dest: rec.dest, finalUrl: verdict.final_url || null };
+    }
+    if (!verdict.ok) {
+      return { ok: true, status: 'failed', job: rec, elapsedS: elapsed,
+        bytesDone: prog?.bytes_done ?? 0, bytesTotal: prog?.bytes_total ?? null,
+        dest: rec.dest, errors: verdict.errors || [],
+        diagnosis: `fp raw legs failed: ${(verdict.errors || []).join(' | ') || 'all legs failed'}` };
+    }
+    let size = Number.isFinite(verdict.size) ? verdict.size : 0;
+    try { size = statSync(rec.dest).size; } catch {}
+    return { ok: true, status: 'done', job: rec, elapsedS: elapsed,
+      bytesDone: size, bytesTotal: prog?.bytes_total ?? size, size,
+      leg: verdict.leg_used || null, dest: rec.dest, finalUrl: verdict.final_url || null,
+      contentType: verdict.content_type || '', truncated: Boolean(verdict.truncated),
+      avgBps: (verdict.elapsed_s && verdict.elapsed_s > 0) ? Math.round(verdict.size / verdict.elapsed_s) : null,
+      hops: Array.isArray(verdict.hops) ? verdict.hops : [],
+      errors: verdict.errors || [] };
+  }
+
+  // ③ 无 verdict ⇒ 还在跑，或挂死
+  if (prog) {
+    // 进度文件里的 updated 是 monotonic 秒，不能跨进程比；用 mtime 判停滞。
+    let mtime = 0;
+    try { mtime = statSync(rec.progressFile).mtimeMs; } catch {}
+    const stallS = mtime ? Math.round((now - mtime) / 1000) : null;
+    const pidAlive = rec.pid ? isPidAlive(rec.pid) : null;
+    const status = (stallS !== null && stallS > stallSec && pidAlive === false) ? 'timeout' : 'working';
+    return { ok: true, status, job: rec, elapsedS: elapsed,
+      bytesDone: prog.bytes_done ?? 0, bytesTotal: prog.bytes_total ?? null,
+      leg: prog.leg || null, phase: prog.status || null, avgBps: prog.avg_Bps ?? null,
+      stallS, pidAlive, dest: rec.dest,
+      ...(status === 'timeout' ? { diagnosis: `作业停滞 ${stallS}s 无进度且进程已退出（按 TIMEOUT 处理）` } : {}) };
+  }
+
+  // ④ 既无进度也无 verdict：刚发起（python 还没写第一跳进度）或已死
+  const pidAlive = rec.pid ? isPidAlive(rec.pid) : null;
+  if (elapsed <= 10 || pidAlive) {
+    return { ok: true, status: 'working', job: rec, elapsedS: elapsed,
+      bytesDone: 0, bytesTotal: null, leg: null, phase: 'starting', pidAlive, dest: rec.dest };
+  }
+  return { ok: true, status: 'lost', job: rec, elapsedS: elapsed,
+    bytesDone: 0, bytesTotal: null, pidAlive, dest: rec.dest,
+    diagnosis: '作业进程已退出且无 verdict/进度（可能被宿主回收或启动即失败）' };
+}
+
+/** 进程是否还活着（Windows 上用 tasklist，失败则返回 null = 未知，不编）。 */
+function isPidAlive(pid) {
+  try {
+    return String(execFileSync('tasklist', ['/FI', `PID eq ${pid}`, '/NH'], { encoding: 'utf8', windowsHide: true })).includes(String(pid));
+  } catch { return null; }
+}
+
+/** 清扫过期作业台账（>1h），与 fp_ 家族同口径，只碰自家 .fpjob 目录。 */
+export function sweepJobs(outDir) {
+  const removed = [];
+  const d = jobDirOf(outDir);
+  let names = [];
+  try { names = readdirSync(d); } catch { return removed; }
+  const cutoff = Date.now() - 3600_000;
+  for (const n of names) {
+    const p = join(d, n);
+    try { if (statSync(p).mtimeMs < cutoff) { unlinkSync(p); removed.push(n); } } catch {}
+  }
+  return removed;
 }

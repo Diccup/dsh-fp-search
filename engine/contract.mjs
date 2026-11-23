@@ -47,8 +47,8 @@ export const OPS = Object.freeze([
     }),
     Object.freeze({
         op: 'fetch',
-        oneLine: '取原件落盘（url → 原始字节；裸抓失败自动降级反扒原始字节腿 http→waf→tls），默认落系统临时目录 dsh-fp-download（outDir 可覆盖）',
-        requires: Object.freeze(['url']),
+        oneLine: '取原件落盘（url → 原始字节；裸抓失败自动降级反扒原始字节腿 http→waf→tls），默认落系统临时目录 dsh-fp-download（outDir 可覆盖）；background:true 发起后台下载并立即返回 jobId，再用 job:"<id>" 轮询实时进度',
+        requires: Object.freeze(['url|job']),
     }),
     Object.freeze({
         op: 'doctor',
@@ -67,7 +67,7 @@ export const WANT_OPS = Object.freeze(OPS.map((o) => o.op));
  */
 export const EXPECTED_PARAMS = Object.freeze({
     search: Object.freeze(['op', 'query', 'url', 'engines', 'limit', 'media', 'fullSnippet', 'noFpFallback', 'fpLegTimeoutSec']),
-    fetch: Object.freeze(['op', 'url', 'outDir', 'maxBytes', 'legs']),
+    fetch: Object.freeze(['op', 'url', 'outDir', 'maxBytes', 'legs', 'background', 'job']),
     doctor: Object.freeze(['op']),
 });
 

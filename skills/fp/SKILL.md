@@ -34,16 +34,26 @@ fp({op:"search", url:"https://example.com/article"})        // 取正文
 fp({op:"fetch", url:"https://example.com/a.pdf"})
 fp({op:"fetch", url:"…", outDir:"D:\\downloads", maxBytes:10485760})
 fp({op:"fetch", url:"反扒站上的文件", legs:"always"})
+fp({op:"fetch", url:"大文件.tgz", background:true})     → 立即返回 jobId，不阻塞
+fp({op:"fetch", job:"<jobId>"})                        → 查当下进度
 ```
 
 - 落的是**原始字节**（不是文本、不是字符数），PDF/图片能直接打开。
 - 默认落点：系统临时目录下的 `dsh-fp-download`（可用环境变量 `FP_OUT_DIR` 覆盖），也可用 `outDir` 覆盖。
 - `legs`：`auto`（默认，裸抓失败降级反扒腿）/ `always`（直接走反扒腿）/ `off`（只用裸抓）。
+- **★ 后台下载 + 实时进度（11 片，大文件首选）**：
+  - `background:true` ⇒ **本次调用立即返回 jobId**（实测约 14ms），下载在宿主 python 子进程继续跑，会话不被占住；
+  - `fetch({job:"<id>"})` ⇒ 随时查**当下**：`fetch · job <id> · working · 22.5% · 1310720/5825770 bytes · 4s · 316 KB/s` + 相位/腿；
+    终态 `done` 带 `saved:` 与 `via:`；另有 `failed/blocked/timeout/lost` 五种如实状态；
+  - **形态边界（如实）**：进度是**主动轮询的当下快照**，不是自动蹦的进度条——宿主无推送通道（06 S1 契约级实锤）。
+    要"下了多少/多久/百分比"，调一次 `fetch({job})` 就有；
+  - 作业只在 `background` 下产生；同步 `fetch` 仍是原行为（阻塞到落盘）。
+  - 作业台账 `<outDir>\.fpjob\<id>.json`，>1h 自动清扫；SSRF 闸对 `background` 同样生效。
+- **卡死修复（11 片 P0）**：Node 裸抓加 120s 超时，挂起连接不再让调用永冻（原行为会让会话半天不动）。
 - **实时进度（06 片）**：反扒腿下载期间在 `<落盘名>.fpdl.json` 写进度小文件
   （已收字节/总长/均速/当前腿，≥0.4 秒一跳；`http` 腿逐块真进度，`waf/tls` 腿只有相位——
   curl 全量入内存，拦不住，如实限定）。**完成/失败即删除**（消失=终态）；它是 `fp_` 前缀家族，
-  清扫自动覆盖。宿主无工具进度推送通道（06 S1 探测=契约级实锤），所以外部可观察是唯一诚实形态；
-  交付文本的 via 行汇总总用时与均速（`· Ns · N KB/s`）。Node 裸抓路（无 via 行）不受影响。
+  清扫自动覆盖。交付文本的 via 行汇总总用时与均速（`· Ns · N KB/s`）。Node 裸抓路（无 via 行）不受影响。
 - **缺 op 一律如实报错（06 A 案，主人 2026-11-19 定）**：不再返回 op 帮助表（旧行为把调用故障
   洗白成成功）；要能力面自述 ⇒ `op:"doctor"`。
 

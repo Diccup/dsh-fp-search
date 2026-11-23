@@ -1,6 +1,6 @@
 {
   "name": "dsh-fp-search",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "dsh-fp-search（FP）：独立网页搜索/取正文/取原件插件，工具面 fp 三 op（search / fetch / doctor）",
   "keywords": [
     "dsh",

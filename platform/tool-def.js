@@ -71,7 +71,7 @@ export function compileParametersToJsonSchema(flat) {
 export const PARAMS = {
     op: { type: 'string', description: '要调哪个能力：search / fetch / doctor；必填，缺失将如实报错（06 起不再回 op 表）', required: true },
     query: { type: 'string', description: 'search 用：查询词（1~6 个词，优先包名/仓库名/报错码这类标识符），与 url 二选一' },
-    url: { type: 'string', description: 'search 的取正文形态，或 fetch 的取原件目标。与 query 二选一（fetch 必填）' },
+    url: { type: 'string', description: 'search 的取正文形态，或 fetch 的取原件目标。search 形态与 query 二选一；fetch 必填（除非给了 job 查进度）' },
     engines: { type: 'array', description: 'search 用：只跑这几家引擎（默认全部 22 家活引擎聚合）' },
     limit: { type: 'number', description: 'search 用：交付条数上限' },
     media: { type: 'string', description: 'search 用：image / video，走媒体面' },
@@ -81,6 +81,8 @@ export const PARAMS = {
     outDir: { type: 'string', description: 'fetch 用：落盘目录（默认系统临时目录下的 dsh-fp-download，可用 outDir 覆盖）' },
     maxBytes: { type: 'number', description: 'fetch 用：单个文件字节上限' },
     legs: { type: 'string', description: 'fetch 用：auto（默认，裸抓失败降级反扒腿）/ always（直接走反扒腿）/ off（只用裸抓）' },
+    background: { type: 'boolean', description: 'fetch 用：true = 发起后台下载并立即返回 jobId（不阻塞、适合大文件），之后用 job 轮询进度' },
+    job: { type: 'string', description: 'fetch 用：给 jobId 查该后台作业的当下进度（字节/百分比/用时/均速/腿）或终态；给了 job 就不需要 url' },
 };
 
 /** 只要 PARAMS 里列出的这些键（其余由 describe 决定）。 */

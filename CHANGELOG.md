@@ -4,6 +4,36 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.2.0] - 2026-11-24
+
+功能轮：FETCH 支持后台下载与实时进度，并修掉 Node 裸抓的卡死。
+
+### 新增
+
+- **FETCH 后台下载 + 实时进度（P1）**：新增 `background` 与 `job` 两个参数。
+  - `fp({op:"fetch", url:"…", background:true})` 立即返回 jobId，下载在宿主 python
+    子进程继续，**不再占住调用**（实测约 14ms 返回）。
+  - `fp({op:"fetch", job:"<id>"})` 随时查当下进度：已下字节 / 百分比 / 已用时间 /
+    均速 / 当前腿 / 相位；终态返回落盘路径与 via，另含
+    `failed` / `blocked` / `timeout` / `lost` 四种如实状态。
+  - 作业台账落在 `<outDir>\.fpjob\<id>.json`，超过 1 小时由既有 `fp_` 清扫家族回收。
+  - 形态边界如实：进度是**主动轮询的当下快照**，不是自动推送的进度条（宿主无工具
+    进度推送通道，06 S1 探测已定案）。
+
+### 修复
+
+- **Node 裸抓无超时导致调用永冻（P0）**：`nodeFetch` 的 `fetch()` 与
+  `arrayBuffer()` 两处原先没有中止信号，遇到慢站或挂起连接会 `await` 永不返回
+  ⇒ 整个工具调用冻结（实测 arxiv PDF）。现挂 `AbortSignal.timeout(120s)`，
+  超时给出明确死因，`auto` 模式照常降级反扒腿。
+- **轮询路径被入口 SSRF 闸误拦（P1，本片自造）**：入口闸原先在分派前无条件调用，
+  而 `job` 轮询没有 `url` ⇒ 崩 `url 无法解析：undefined`。现闸只对需要 URL 的形态生效。
+
+### 文档
+
+- `skills/fp/SKILL.md` 补上 `background` / `job` 用法、交付形状与形态边界
+  —— 原先文档一字未提，模型无从得知该能力。
+
 ## [0.1.1] - 2026-11-21
 
 修复轮：本体检查（2026-11-21）发现的问题已全部处理。

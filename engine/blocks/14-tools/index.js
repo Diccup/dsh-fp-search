@@ -173,14 +173,20 @@ async function callSearch(ctx, args) {
 }
 
 async function callFetch(ctx, args) {
-    rejectUnknown('fetch', args, ['url', 'outDir', 'maxBytes', 'legs']);
-    if (typeof args.url !== 'string' || args.url.trim() === '') {
-        throw new FpError(ERR.NO_TARGET, 'fp fetch：必须给 url', '补 url 再调。');
+    rejectUnknown('fetch', args, ['url', 'outDir', 'maxBytes', 'legs', 'background', 'job']);
+    const job = typeof args.job === 'string' && args.job.trim() !== '' ? args.job.trim() : undefined;
+    // ★ 11：job 轮询形态不需要 url（查的是已发起的作业）
+    if (job === undefined) {
+        if (typeof args.url !== 'string' || args.url.trim() === '') {
+            throw new FpError(ERR.NO_TARGET, 'fp fetch：必须给 url（或给 job 查后台作业进度）', '补 url 再调；查进度用 job:"<jobId>"。');
+        }
     }
     // ★ A-10：maxBytes 也走宽容解析（"1000" 这种数字串不许静默失效）
     const maxBytes = looseNumber('fetch', 'maxBytes', args.maxBytes);
     const legs = looseEnumStr('fetch', 'legs', args.legs, ['auto', 'always', 'off']);
-    return await fetchToDisk(ctx, { url: args.url, outDir: args.outDir, maxBytes, legs });
+    // ★ 11：布尔宽容解析（"true"/"1" 都认，宿主传参变形老账 A-10）
+    const background = looseBool('fetch', 'background', args.background);
+    return await fetchToDisk(ctx, { url: args.url, outDir: args.outDir, maxBytes, legs, background, job });
 }
 
 async function callDoctor(ctx, args) {
