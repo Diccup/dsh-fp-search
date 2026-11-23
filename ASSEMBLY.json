@@ -1,0 +1,38 @@
+{
+  "name": "dsh-fp-search",
+  "version": "0.1.1",
+  "assembledAt": "2026-11-21T15:23:35.967Z",
+  "assembledFrom": {
+    "src": "Work/dsh-fp-search/src",
+    "groups": [
+      "ours",
+      "fp",
+      "deps/pylibs",
+      "libs→ours/libs",
+      "deps/pylibs_probe.py"
+    ]
+  },
+  "counts": {
+    "files": 206,
+    "mismatched": 0,
+    "srcBaseline": 206
+  },
+  "skipped": {
+    "segments": [
+      "__pycache__",
+      ".tmp",
+      "out",
+      "diag"
+    ],
+    "files": [
+      ".cdp-last-err.log",
+      ".DS_Store",
+      "Thumbs.db"
+    ]
+  },
+  "rules": [
+    "src 只读：装配前后各验一次哈希，drift 必须 = 0",
+    "运行残渣不进包：fp/out/**、__pycache__/**、.cdp-last-err.log",
+    "libs 两件落到 ours/libs/（url-guard.js 引 ./err.js 必须同层）"
+  ]
+}

@@ -1,0 +1,7 @@
+# fpwebsearch 运行依赖
+# Python 3.12（建议用 DSH 打包的 python.exe）
+lxml>=5.0
+curl_cffi>=0.7
+certifi
+# 可选：滑块识别用（challenge/slider.py 的 gap_x 无 Pillow 时返回 -1）
+Pillow>=10.0

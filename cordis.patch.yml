@@ -1,0 +1,12 @@
+# dsh-fp-search bundle patch.
+#
+# ★ 形状照同型对照组 `dsh-eco-context/cordis.patch.yml`（本机正常运行的插件）：
+#   同样有 `inject: [tools, systemPrompt]`，且运转正常 —— 所以 inject 不是问题。
+#   （2026-11-09 一度删掉 inject 试图修"不加载"，那是误判，已还原。）
+- insert:
+    - id: dsh-fp-search
+      name: 'dsh-fp-search'
+      inject: [tools, systemPrompt]
+      config:
+        enabled: true
+

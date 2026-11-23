@@ -1,0 +1,58 @@
+{
+  "name": "dsh-fp-search",
+  "version": "0.1.1",
+  "description": "dsh-fp-search（FP）：独立网页搜索/取正文/取原件插件，工具面 fp 三 op（search / fetch / doctor）",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "search",
+    "fetch",
+    "web"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "main": "platform/plugin.js",
+  "exports": {
+    ".": {
+      "import": "./platform/plugin.js"
+    },
+    "./package.json": "./package.json",
+    "./cordis.patch.yml": "./cordis.patch.yml"
+  },
+  "files": [
+    "platform",
+    "engine",
+    "ours",
+    "fp",
+    "deps/pylibs",
+    "deps/pylibs_probe.py",
+    "skills",
+    "scripts",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE",
+    "ASSEMBLY.json",
+    "CHANGELOG.md",
+    "NOTICE",
+    "CONTRIBUTING.md",
+    "DISCLAIMER.md",
+    ".gitignore",
+    ".github/workflows/ci.yml"
+  ],
+  "engines": {
+    "node": "^22.19 || >=24"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/Diccup/dsh-fp-search.git"
+  },
+  "homepage": "https://github.com/Diccup/dsh-fp-search#readme",
+  "bugs": {
+    "url": "https://github.com/Diccup/dsh-fp-search/issues"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

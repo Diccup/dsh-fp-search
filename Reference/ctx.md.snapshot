@@ -1,0 +1,23 @@
+Example: ctx({op:"run",code:"…"})；不传 op 返回本表。
+ctx — 执行/检索/记忆统一入口。
+
+run 跑代码/命令/批量。可跑 javascript|shell|python（python 用随包 python）；不写 language 默认 javascript
+search query|url 搜网页/抓正文（media=image|video；limit:10-30）
+recall queries[] 本地库取回（数组，可多问；也认单串/JSON 串）；source 过滤来源；sort/offset/limit/contentType 可选
+index path|content|url|dir 入临时库（14 天删线）；配 pin+category 进长久库；sessionId=写会话标记
+remember title+content+category 手录进长久库（≤64KB）
+pin label+category 临时库→长久库（多块合一）
+unpin label 长久库→临时库（多受删线）
+memory action list|get|setCategory|delete|stats（get 认 id/label）
+stats 库大小与磁盘（主库+WAL 分列）
+doctor fix 体检（fix 才修）
+maint action plan|retention|optimize|checkpoint|integrity|vacuum（days=保留天数）
+purge scope session|source|project 默认干跑，dryRun:false 才真删（project=整库蒸发，须主人同意，不走 op）
+switch action list|off|on tool 关/开宿主工具（全局落盘）
+list 本表
+细用某 op 先读对应 skill：search→ctx-op-search；index/remember/pin/unpin/memory→ctx-op-index；stats/doctor/maint→ctx-op-stats；purge→ctx-op-purge
+
+坑：dir 不能配 pin
+批量：别并发开多个 shell
+取回：ctx({op:"recall",queries:["词1","词2"],source:"run:…"})
+升权：sandbox_permissions+justification 成对，仅本次
