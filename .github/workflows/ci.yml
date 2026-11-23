@@ -23,6 +23,33 @@ jobs:
         with:
           node-version: '22'
 
+      # ★ 必须显式装 Python（2026-11-23 实测修 CI 随机红）：
+      #   门 G5 的 S-6 要做「JS↔python 判据对账」、G4 的 S-8 要用 python 跑反例；
+      #   python 发现逻辑（ours/python-find.js）最后兜底是「PATH 上的 python」，
+      #   而 windows-latest 镜像**不保证 PATH 里有 python**（镜像版本一变就没了）
+      #   ⇒ 找不到 python ⇒ S-6 无对账结果 ⇒ G5 红 ⇒ 全门红 ⇒ CI 随机红。
+      #   实测症状：同一份代码，绿一次红一次（run 45162361412 绿 / 45162511102 红）。
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # ★ 显式指路给插件的 python 发现逻辑（ours/python-find.js 第一优先读 DSH_FP_PYTHON）：
+      #   PATH 上的 python 在 Windows 上可能是 WindowsApps 假桩（退出码 9009），
+      #   而 python-find.js 的最后兜底才看 PATH ⇒ 必须显式给绝对路径。
+      - name: Resolve python for the plugin (DSH_FP_PYTHON)
+        shell: pwsh
+        run: |
+          $py = (Get-Command python -ErrorAction Stop).Source
+          Write-Host "resolved python: $py"
+          "DSH_FP_PYTHON=$py" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Show environment (python/node resolved)
+        shell: pwsh
+        run: |
+          python --version
+          node --version
+          Write-Host "DSH_FP_PYTHON=$env:DSH_FP_PYTHON"
+
       - name: Syntax-check plugin entry
         shell: pwsh
         run: |
@@ -33,7 +60,18 @@ jobs:
       - name: Run self-test / acceptance gate
         shell: pwsh
         run: |
-          node engine/verify/all.mjs
+          # ★ 把全门输出**整份**打出来（all.mjs 只在失败时打最后 12 行）——
+          #   CI 红了要能直接看出是哪道门、哪条判据，不用再去翻源码。
+          $log = Join-Path $env:RUNNER_TEMP 'gate.log'
+          node engine/verify/all.mjs 2>&1 | Tee-Object -FilePath $log
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host '---- gate output (full) ----'
+            Get-Content $log | Write-Host
+            Write-Host "---- environment ----"
+            Write-Host "python: $env:DSH_FP_PYTHON"
+            Write-Host "node: $(node --version)"
+            exit $LASTEXITCODE
+          }
 
       - name: Guard — no hardcoded developer-machine absolute paths
         shell: pwsh
