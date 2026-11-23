@@ -7,6 +7,14 @@ node_modules/
 pnpm-lock.yaml
 package-lock.json
 
+# ★ 内部开发内容（永不上 GitHub；主人 2026-11-23 令）
+#   这些是开发过程的素材与日志，不属于成品。发布仓（Public）由本文件统一覆盖，
+#   避免第二份手写忽略清单漂移（教训 #13/#75：维护一份本来可以算出来的清单 = 事故根源）。
+src/
+Reference/
+Updating/
+*.rar
+
 # 运行时数据（不该进仓库）
 .content/
 engine/.content/

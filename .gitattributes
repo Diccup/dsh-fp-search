@@ -1,0 +1,30 @@
+# 换行符与二进制件口径（DSH 插件发布版）
+#
+# ★ 为什么必须有这个文件（2026-11-23 实测事故）：
+#   本机 git core.autocrlf=true，Windows 检出时会把 LF 变成 CRLF。
+#   engine\verify\gate-selfcheck.mjs 的反例锚点是**按 \n 字面量**匹配的，
+#   CRLF 下"改坏锚点没落上" ⇒ G4 判红，但代码其实没坏 ⇒ **CI 假红**。
+#   实测：Public 工作区 engine/verify/all.mjs 的 CR 字节 = 102（Work = 0、git blob = 0），
+#   统一转 LF 后 G4 由红转绿。CI 用 actions/checkout 在 windows-latest 检出，
+#   不锁 LF ⇒ 必红。故本文件强制文本件一律 LF。
+#
+# ★ 二进制件必须标 binary，否则 git 会尝试换行转换 → 内容被改坏。
+#   deps\pylibs\ 里含 .pyd（CPython 扩展）/ .dll / .exe / .pem，漏标 = 运行时必坏。
+
+* text=auto eol=lf
+
+*.pyd binary
+*.dll binary
+*.exe binary
+*.pem binary
+*.rar binary
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.whl binary

@@ -37,6 +37,7 @@
     "CONTRIBUTING.md",
     "DISCLAIMER.md",
     ".gitignore",
+    ".gitattributes",
     ".github/workflows/ci.yml"
   ],
   "engines": {
